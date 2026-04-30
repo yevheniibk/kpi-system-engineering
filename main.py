@@ -58,13 +58,15 @@ class ControlAutomationSystem(BaseSubsystem):
         self.recipe = None
         self.mash_temperature = None
         self.fermentation_temperature = None
-        self.pressure = None
+        self.original_gravity = None # Додано початкову щільність
+        self.final_gravity = None    # Додано кінцеву щільність
 
-    def set_recipe(self, recipe_name, mash_temperature, fermentation_temperature, pressure):
+    def set_recipe(self, recipe_name, mash_temperature, fermentation_temperature, original_gravity, final_gravity):
         self.recipe = recipe_name
         self.mash_temperature = mash_temperature
         self.fermentation_temperature = fermentation_temperature
-        self.pressure = pressure
+        self.original_gravity = original_gravity
+        self.final_gravity = final_gravity
         self.state = "configured"
 
     def start_control(self):
@@ -75,7 +77,8 @@ class ControlAutomationSystem(BaseSubsystem):
             "recipe": self.recipe,
             "mash_temperature": self.mash_temperature,
             "fermentation_temperature": self.fermentation_temperature,
-            "pressure": self.pressure,
+            "original_gravity": self.original_gravity,
+            "final_gravity": self.final_gravity,
         }
 
     def log_parameters(self):
@@ -89,7 +92,8 @@ class ControlAutomationSystem(BaseSubsystem):
         self.recipe = None
         self.mash_temperature = None
         self.fermentation_temperature = None
-        self.pressure = None
+        self.original_gravity = None
+        self.final_gravity = None
 
 
 class MillingSystem(BaseSubsystem):
@@ -244,6 +248,15 @@ class FermentationSystem(BaseSubsystem):
         self.matured = False
         self.yeast_separated = False
         self.fermentation_temperature = None
+        self.abv = None  # Змінна для міцності пива
+
+    def calculate_abv(self, original_gravity, final_gravity):
+        """Розраховує міцність пива за зміною щільності."""
+        if original_gravity <= final_gravity:
+            raise BreweryError("Початкова щільність має бути більшою за кінцеву.")
+
+        self.abv = round((original_gravity - final_gravity) * 131.25, 2)
+        return self.abv
 
     def add_yeast(self):
         self.yeast_added = True
@@ -265,10 +278,11 @@ class FermentationSystem(BaseSubsystem):
         self.fermentation_completed = True
         self.state = "fermentation_completed"
 
-    def ferment(self, fermentation_temperature):
+    def ferment(self, fermentation_temperature, original_gravity, final_gravity):
         self.add_yeast()
         self.start_fermentation(fermentation_temperature)
         self.maintain_temperature()
+        self.calculate_abv(original_gravity, final_gravity)  # Розрахунок під час бродіння
         self.mature_beer()
         self.separate_yeast()
         self.state = "fermented"
@@ -280,6 +294,7 @@ class FermentationSystem(BaseSubsystem):
         self.matured = False
         self.yeast_separated = False
         self.fermentation_temperature = None
+        self.abv = None
 
 
 class FinalFiltrationSystem(BaseSubsystem):
@@ -315,6 +330,15 @@ class BottlingPackagingSystem(BaseSubsystem):
         self.filled = False
         self.packaged = False
 
+    def define_strength_category(self, abv):
+        """Визначає категорію пива за міцністю."""
+        if abv > 7.0:
+            return "міцне пиво"
+        elif abv > 4.0:
+            return "стандартне пиво"
+        else:
+            return "легке пиво"
+
     def prepare_containers(self):
         self.containers_prepared = True
         self.state = "containers_ready"
@@ -330,8 +354,12 @@ class BottlingPackagingSystem(BaseSubsystem):
         self.packaged = True
         self.state = "packaged"
 
-    def bottle_and_package(self):
+    def bottle_and_package(self, abv):
         self.prepare_containers()
+
+        beer_category = self.define_strength_category(abv)
+        print(f"   Категорія продукту за ABV: {beer_category}")
+
         self.fill_containers()
         self.label_product()
         self.package_batch()
@@ -430,13 +458,15 @@ class Brewery:
         self.power_supply_system.supply_power()
         self.state = "waiting"
 
-    def select_recipe(self, recipe_name, mash_temperature, fermentation_temperature, pressure):
+    def select_recipe(self, recipe_name, mash_temperature, fermentation_temperature, original_gravity,
+                      final_gravity):
         self.require_state("waiting")
         self.control_system.set_recipe(
             recipe_name,
             mash_temperature,
             fermentation_temperature,
-            pressure
+            original_gravity,  # Передаємо OG
+            final_gravity  # Передаємо FG
         )
         self.state = "recipe_selected"
 
@@ -460,12 +490,22 @@ class Brewery:
         self.require_state("wort_brewing")
         params = self.control_system.get_parameters()
         fermentation_temperature = params["fermentation_temperature"]
+        original_gravity = params["original_gravity"]
+        final_gravity = params["final_gravity"]
 
         self.thermal_processing_system.cool_wort()
-        self.fermentation_system.ferment(
-            fermentation_temperature=fermentation_temperature
-        )
-        self.state = "fermentation_and_maturation"
+
+        if self.brewer.qualification == 'Старший пивовар':
+            self.fermentation_system.ferment(
+                fermentation_temperature=fermentation_temperature,
+                original_gravity=original_gravity,
+                final_gravity=final_gravity
+            )
+            self.state = "fermentation_and_maturation"
+        else:
+            raise BreweryError(
+                f"Пивовар має недостатню кваліфікацію"
+            )
 
     def filter_and_finish(self):
         self.require_state("fermentation_and_maturation")
@@ -474,7 +514,8 @@ class Brewery:
 
     def bottle_and_package(self):
         self.require_state("final_filtration")
-        self.bottling_packaging_system.bottle_and_package()
+        current_abv = self.fermentation_system.abv
+        self.bottling_packaging_system.bottle_and_package(abv=current_abv)
         self.control_system.log_parameters()
         self.state = "packaged"
 
@@ -522,54 +563,62 @@ def demo():
     print("=== Ініціалізація ===")
     print(brewery.get_status())
 
-    print("\n=== Увімкнення ===")
-    brewery.power_on()
-    print(brewery.get_status())
-
-    print("\n=== Вибір рецепта ===")
-    brewery.select_recipe(
-        "Світлий лагер",
-        mash_temperature=65.0,
-        fermentation_temperature=12.0,
-        pressure=1.2
-    )
-    print(f"Рецепт: {brewery.control_system.recipe}, стан пивоварні: {brewery.state}")
-
-    print("\n=== Підготовка сировини ===")
-    brewery.prepare_raw_materials()
-    print(brewery.get_status())
-
-    print("\n=== Варіння сусла ===")
-    brewery.brew_wort()
-    print(brewery.get_status())
-
-    print("\n=== Охолодження та ферментація ===")
-    brewery.cool_and_ferment()
-    print(f"Температура ферментації: {brewery.fermentation_system.fermentation_temperature}°C")
-    print(brewery.get_status())
-
-    print("\n=== Фінішна фільтрація ===")
-    brewery.filter_and_finish()
-    print(brewery.get_status())
-
-    print("\n=== Розлив і пакування ===")
-    brewery.bottle_and_package()
-    print(brewery.get_status())
-
-    print("\n=== Санітарна обробка ===")
-    brewery.clean_equipment()
-    print(brewery.get_status())
-
-    print("\n=== Вимкнення ===")
-    brewery.power_off()
-    print(brewery.get_status())
-
-    print("\n=== Перевірка контролю станів ===")
     try:
-        brewery.brew_wort()
-    except InvalidStateError as error:
-        print(f"Помилка: {error}")
+        print("\n=== Увімкнення ===")
+        brewery.power_on()
+        print(brewery.get_status())
 
+        print("\n=== Вибір рецепта ===")
+        brewery.select_recipe(
+            "Світлий лагер",
+            mash_temperature=65.0,
+            fermentation_temperature=12.0,
+            original_gravity=1.050,  # Задаємо типову щільність до бродіння
+            final_gravity=1.010  # Задаємо типову щільність після бродіння
+        )
+        print(f"Рецепт: {brewery.control_system.recipe}, стан пивоварні: {brewery.state}")
+
+        print("\n=== Підготовка сировини ===")
+        brewery.prepare_raw_materials()
+        print(brewery.get_status())
+
+        print("\n=== Варіння сусла ===")
+        brewery.brew_wort()
+        print(brewery.get_status())
+
+        print("\n=== Охолодження та ферментація ===")
+        brewery.cool_and_ferment()
+        print(f"Температура ферментації: {brewery.fermentation_system.fermentation_temperature}°C")
+        print(f"Розрахована міцність пива (ABV): {brewery.fermentation_system.abv}%")  # Виводимо міцність
+        print(brewery.get_status())
+
+        print("\n=== Фінішна фільтрація ===")
+        brewery.filter_and_finish()
+        print(brewery.get_status())
+
+        print("\n=== Розлив і пакування ===")
+        brewery.bottle_and_package()
+        print(brewery.get_status())
+
+        print("\n=== Санітарна обробка ===")
+        brewery.clean_equipment()
+        print(brewery.get_status())
+
+        print("\n=== Вимкнення ===")
+        brewery.power_off()
+        print(brewery.get_status())
+
+        print("\n=== Перевірка контролю станів ===")
+        try:
+            brewery.brew_wort()
+        except InvalidStateError as error:
+            print(f"Помилка: {error}")
+
+    except BreweryError as error:
+        print(f"\n❌ [АВАРІЙНА ЗУПИНКА]: {error}")
+        print("Процес варіння перервано. Викличте кваліфікований персонал.")
 
 if __name__ == "__main__":
     demo()
+
+
